@@ -1,9 +1,10 @@
 import { HttpStatus, Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
-import { ChangeOrderStatusDto, CreateOrderDto, OrderPaginationDto } from './dto';
+import { ChangeOrderStatusDto, CreateOrderDto, OrderPaginationDto, PaidOrderDto } from './dto';
 import { ClientProxy, RpcException } from '@nestjs/microservices';
 import { NATS_SERVICE } from 'src/config';
 import { firstValueFrom } from 'rxjs';
+import { OrderWithProducts } from './interfaces/order-with-products.interface';
 
 @Injectable()
 export class OrdersService extends PrismaClient implements OnModuleInit {
@@ -120,7 +121,7 @@ export class OrdersService extends PrismaClient implements OnModuleInit {
   async findOne(id: string) {
     const order = await this.order.findFirst({
       where: { id },
-      include: { 
+      include: {
         OrderItem: {
           select: {
             price: true,
@@ -137,7 +138,7 @@ export class OrdersService extends PrismaClient implements OnModuleInit {
       });
     }
 
-    const productIds = order.OrderItem.map( orderItem => orderItem.productId);
+    const productIds = order.OrderItem.map(orderItem => orderItem.productId);
     const products: any[] = await firstValueFrom(
       this.client.send({
         cmd: "validate_products"
@@ -149,7 +150,7 @@ export class OrdersService extends PrismaClient implements OnModuleInit {
     return {
       ...order,
       OrderItem: order.OrderItem.map((orderItem) => ({
-       ...orderItem,
+        ...orderItem,
         name: products.find(product => product.id === orderItem.productId).name
       }))
     }
@@ -173,4 +174,44 @@ export class OrdersService extends PrismaClient implements OnModuleInit {
 
   }
 
+  async createPaymentSession(order: OrderWithProducts) {
+    const paymentSession = await firstValueFrom(
+      this.client.send(
+        "create.payment.session",
+        {
+          orderId: order.id,
+          currency: "usd",
+          items: order.OrderItem.map(item => ({
+            name: item.name,
+            price: item.price,
+            quantity: item.quantity,
+          }))
+        }
+      )
+    );
+    return paymentSession;
+  }
+
+  async validatePayment(paidOrderDto: PaidOrderDto) {
+    this.logger.log("paidorder")
+    this.logger.log(paidOrderDto)
+    const updatedOrder = await this.order.update({
+      where: {
+        id: paidOrderDto.orderId
+      },
+      data: {
+        status: "PAID",
+        paid: true,
+        paidAt: new Date(),
+        stripeChargeId: paidOrderDto.stripePaymentId,
+
+        OrderReceipt: {
+          create: {
+            receiptUrl: paidOrderDto.receiptUrl
+          }
+        }
+      }
+    });
+    return updatedOrder;
+  }
 }
